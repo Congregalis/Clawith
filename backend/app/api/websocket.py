@@ -38,6 +38,15 @@ class ConnectionManager:
                 (ws, sid) for ws, sid in self.active_connections[agent_id] if ws != websocket
             ]
 
+    def update_session(self, agent_id: str, websocket: WebSocket, session_id: str | None):
+        """Update tracked session_id for an active websocket connection."""
+        if agent_id not in self.active_connections:
+            return
+        self.active_connections[agent_id] = [
+            (ws, session_id if ws == websocket else sid)
+            for ws, sid in self.active_connections[agent_id]
+        ]
+
     async def send_message(self, agent_id: str, message: dict):
         if agent_id in self.active_connections:
             for ws, _sid in self.active_connections[agent_id]:
@@ -393,6 +402,7 @@ async def websocket_chat(
     llm_model = None
     fallback_llm_model = None
     history_messages = []
+    agent_id_str = str(agent_id)
 
     try:
         async with async_session() as db:
@@ -446,21 +456,25 @@ async def websocket_chat(
             from app.models.chat_session import ChatSession
             from sqlalchemy import select as _sel
             from datetime import datetime as _dt, timezone as _tz
-            conv_id = session_id
-            if conv_id:
-                # Validate the session belongs to this agent
-                _sr = await db.execute(
-                    _sel(ChatSession).where(
-                        ChatSession.id == uuid.UUID(conv_id),
-                        ChatSession.agent_id == agent_id,
-                    )
-                )
-                _existing = _sr.scalar_one_or_none()
-                if not _existing:
-                    conv_id = None  # fall through to create
-            if not conv_id:
-                # Find most recent session for this user+agent
-                _sr = await db.execute(
+            async def _ensure_chat_session_id(_db: AsyncSession, current_conv_id: str | None) -> str:
+                if current_conv_id:
+                    try:
+                        conv_uuid = uuid.UUID(current_conv_id)
+                    except Exception:
+                        conv_uuid = None
+                    if conv_uuid:
+                        _sr = await _db.execute(
+                            _sel(ChatSession).where(
+                                ChatSession.id == conv_uuid,
+                                ChatSession.agent_id == agent_id,
+                                ChatSession.user_id == user_id,
+                            )
+                        )
+                        _existing = _sr.scalar_one_or_none()
+                        if _existing:
+                            return str(_existing.id)
+
+                _sr = await _db.execute(
                     _sel(ChatSession)
                     .where(ChatSession.agent_id == agent_id, ChatSession.user_id == user_id)
                     .order_by(ChatSession.last_message_at.desc().nulls_last(), ChatSession.created_at.desc())
@@ -468,21 +482,23 @@ async def websocket_chat(
                 )
                 _latest = _sr.scalar_one_or_none()
                 if _latest:
-                    conv_id = str(_latest.id)
-                else:
-                    # Create a default session
-                    now = _dt.now(_tz.utc)
-                    _new_session = ChatSession(
-                        agent_id=agent_id, user_id=user_id,
-                        title=f"Session {now.strftime('%m-%d %H:%M')}",
-                        source_channel="web",
-                        created_at=now,
-                    )
-                    db.add(_new_session)
-                    await db.commit()
-                    await db.refresh(_new_session)
-                    conv_id = str(_new_session.id)
-                    print(f"[WS] Created default session {conv_id}")
+                    return str(_latest.id)
+
+                now = _dt.now(_tz.utc)
+                _new_session = ChatSession(
+                    agent_id=agent_id,
+                    user_id=user_id,
+                    title=f"Session {now.strftime('%m-%d %H:%M')}",
+                    source_channel="web",
+                    created_at=now,
+                )
+                _db.add(_new_session)
+                await _db.commit()
+                await _db.refresh(_new_session)
+                print(f"[WS] Created default session {str(_new_session.id)}")
+                return str(_new_session.id)
+
+            conv_id = await _ensure_chat_session_id(db, session_id)
 
             try:
                 history_result = await db.execute(
@@ -503,7 +519,6 @@ async def websocket_chat(
         await websocket.close(code=4002)  # Config error — client should NOT retry
         return
 
-    agent_id_str = str(agent_id)
     if agent_id_str not in manager.active_connections:
         manager.active_connections[agent_id_str] = []
     manager.active_connections[agent_id_str].append((websocket, conv_id))
@@ -591,6 +606,11 @@ async def websocket_chat(
             if file_name:
                 saved_content = f"[file:{file_name}]\n{saved_content}"
             async with async_session() as db:
+                resolved_conv_id = await _ensure_chat_session_id(db, conv_id)
+                if resolved_conv_id != conv_id:
+                    print(f"[WS] Session {conv_id} no longer exists, switched to {resolved_conv_id}")
+                    conv_id = resolved_conv_id
+                    manager.update_session(agent_id_str, websocket, conv_id)
                 user_msg = ChatMessage(
                     agent_id=agent_id,
                     user_id=user_id,
@@ -663,12 +683,18 @@ async def websocket_chat(
                     
                     async def tool_call_to_ws(data: dict):
                         """Send tool call info to client and persist completed ones."""
+                        nonlocal conv_id
                         await websocket.send_json({"type": "tool_call", **data})
                         # Save completed tool calls to DB so they persist in chat history
                         if data.get("status") == "done":
                             try:
                                 import json as _json_tc
                                 async with async_session() as _tc_db:
+                                    resolved_conv_id = await _ensure_chat_session_id(_tc_db, conv_id)
+                                    if resolved_conv_id != conv_id:
+                                        print(f"[WS] Session {conv_id} no longer exists, switched to {resolved_conv_id}")
+                                        conv_id = resolved_conv_id
+                                        manager.update_session(agent_id_str, websocket, conv_id)
                                     tc_msg = ChatMessage(
                                         agent_id=agent_id,
                                         user_id=user_id,
@@ -833,6 +859,11 @@ async def websocket_chat(
 
             # Save assistant message
             async with async_session() as db:
+                resolved_conv_id = await _ensure_chat_session_id(db, conv_id)
+                if resolved_conv_id != conv_id:
+                    print(f"[WS] Session {conv_id} no longer exists, switched to {resolved_conv_id}")
+                    conv_id = resolved_conv_id
+                    manager.update_session(agent_id_str, websocket, conv_id)
                 asst_msg = ChatMessage(
                     agent_id=agent_id,
                     user_id=user_id,
@@ -865,4 +896,3 @@ async def websocket_chat(
             await websocket.close(code=1011)
         except Exception:
             pass
-

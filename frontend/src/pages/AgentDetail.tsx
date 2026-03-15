@@ -864,6 +864,15 @@ function AgentDetailInner() {
         const title = sess.title || 'Untitled Session';
         if (!window.confirm(`Delete session "${title}"?\nThis action cannot be undone.`)) return;
 
+        const deletingActive = activeSession?.id === sess.id;
+        if (deletingActive) {
+            setIsWaiting(false);
+            setIsStreaming(false);
+            setActiveSession(null);
+            setChatMessages([]);
+            setHistoryMsgs([]);
+        }
+
         setDeletingSessionId(sess.id);
         try {
             const tkn = localStorage.getItem('token');
@@ -875,13 +884,14 @@ function AgentDetailInner() {
             if (!res.ok) {
                 const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
                 alert(`Failed to delete session: ${err.detail || res.status}`);
+                if (deletingActive) {
+                    await selectSession(sess);
+                }
                 return;
             }
 
             const latestSessions = await fetchMySessions(true);
-            if (activeSession?.id === sess.id) {
-                setChatMessages([]);
-                setHistoryMsgs([]);
+            if (deletingActive) {
                 if (latestSessions && latestSessions.length > 0) {
                     await selectSession(latestSessions[0]);
                 } else {

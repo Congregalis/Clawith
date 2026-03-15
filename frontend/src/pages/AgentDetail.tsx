@@ -786,6 +786,7 @@ function AgentDetailInner() {
     const [historyMsgs, setHistoryMsgs] = useState<any[]>([]);
     const [sessionsLoading, setSessionsLoading] = useState(false);
     const [agentExpired, setAgentExpired] = useState(false);
+    const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
 
     const fetchMySessions = async (silent = false) => {
         if (!id) return;
@@ -855,6 +856,42 @@ function AgentDetailInner() {
                 // Other user's session or agent-to-agent: read-only view
                 setHistoryMsgs(msgs);
             }
+        }
+    };
+
+    const deleteSession = async (sess: any) => {
+        if (!id || deletingSessionId) return;
+        const title = sess.title || 'Untitled Session';
+        if (!window.confirm(`Delete session "${title}"?\nThis action cannot be undone.`)) return;
+
+        setDeletingSessionId(sess.id);
+        try {
+            const tkn = localStorage.getItem('token');
+            const res = await fetch(`/api/agents/${id}/sessions/${sess.id}`, {
+                method: 'DELETE',
+                headers: { Authorization: `Bearer ${tkn}` },
+            });
+
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+                alert(`Failed to delete session: ${err.detail || res.status}`);
+                return;
+            }
+
+            const latestSessions = await fetchMySessions(true);
+            if (activeSession?.id === sess.id) {
+                setChatMessages([]);
+                setHistoryMsgs([]);
+                if (latestSessions && latestSessions.length > 0) {
+                    await selectSession(latestSessions[0]);
+                } else {
+                    setActiveSession(null);
+                }
+            }
+        } catch (err: any) {
+            alert(`Failed to delete session: ${err.message || err}`);
+        } finally {
+            setDeletingSessionId(null);
         }
     };
 
@@ -2830,6 +2867,7 @@ function AgentDetailInner() {
                                         ) : sessions.map((s: any) => {
                                             const isActive = activeSession?.id === s.id;
                                             const isOwn = s.user_id === String(currentUser?.id);
+                                            const deleting = deletingSessionId === s.id;
                                             const channelLabel: Record<string, string> = {
                                                 feishu: t('common.channels.feishu'),
                                                 discord: t('common.channels.discord'),
@@ -2846,6 +2884,29 @@ function AgentDetailInner() {
                                                     <div style={{ display: 'flex', alignItems: 'center', gap: '5px', marginBottom: '2px' }}>
                                                         <div style={{ fontSize: '12px', fontWeight: isActive ? 600 : 400, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>{s.title}</div>
                                                         {chLabel && <span style={{ fontSize: '9px', padding: '1px 4px', borderRadius: '3px', background: 'var(--bg-tertiary)', color: 'var(--text-tertiary)', flexShrink: 0 }}>{chLabel}</span>}
+                                                        {isOwn && (
+                                                            <button
+                                                                onClick={(e) => {
+                                                                    e.stopPropagation();
+                                                                    deleteSession(s);
+                                                                }}
+                                                                disabled={deleting || !!deletingSessionId}
+                                                                style={{
+                                                                    border: 'none',
+                                                                    background: 'none',
+                                                                    color: 'var(--text-tertiary)',
+                                                                    cursor: deleting ? 'not-allowed' : 'pointer',
+                                                                    fontSize: '12px',
+                                                                    lineHeight: 1,
+                                                                    padding: '0 2px',
+                                                                    opacity: deleting ? 0.5 : 0.85,
+                                                                    flexShrink: 0,
+                                                                }}
+                                                                title={deleting ? 'Deleting...' : 'Delete session'}
+                                                            >
+                                                                {deleting ? '...' : '✕'}
+                                                            </button>
+                                                        )}
                                                     </div>
                                                     <div style={{ fontSize: '10px', color: 'var(--text-tertiary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
                                                         {isOwn && isActive && wsConnected && <span className="status-dot running" style={{ width: '5px', height: '5px', flexShrink: 0 }} />}

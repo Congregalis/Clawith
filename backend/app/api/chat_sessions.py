@@ -6,7 +6,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import get_current_user
@@ -239,6 +239,37 @@ async def rename_session(
     session.title = body.title
     await db.commit()
     return {"id": str(session.id), "title": session.title}
+
+
+@router.delete("/{agent_id}/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_session(
+    agent_id: uuid.UUID,
+    session_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a session and all its messages."""
+    result = await db.execute(
+        select(ChatSession).where(ChatSession.id == session_id, ChatSession.agent_id == agent_id)
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    agent_result = await db.execute(select(Agent).where(Agent.id == agent_id))
+    agent = agent_result.scalar_one_or_none()
+
+    if str(session.user_id) != str(current_user.id) and not _is_admin_or_creator(current_user, agent):
+        raise HTTPException(status_code=403, detail="Not authorized")
+
+    await db.execute(
+        delete(ChatMessage).where(
+            ChatMessage.conversation_id == str(session.id),
+            ChatMessage.agent_id == agent_id,
+        )
+    )
+    await db.delete(session)
+    await db.commit()
 
 
 @router.get("/{agent_id}/sessions/{session_id}/messages")

@@ -144,17 +144,14 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
             settings = get_settings()
 
             heartbeat_instruction = DEFAULT_HEARTBEAT_INSTRUCTION
-            for ws_root in [
-                Path("/tmp/clawith_workspaces") / str(agent_id),
-                Path(settings.AGENT_DATA_DIR) / str(agent_id),
-            ]:
-                hb_file = ws_root / "HEARTBEAT.md"
-                if hb_file.exists():
-                    try:
-                        custom = hb_file.read_text(encoding="utf-8", errors="replace").strip()
-                        if custom:
-                            # Prepend privacy rules to custom heartbeat
-                            heartbeat_instruction = custom + """
+            ws_root = Path(settings.AGENT_DATA_DIR) / str(agent_id)
+            hb_file = ws_root / "HEARTBEAT.md"
+            if hb_file.exists():
+                try:
+                    custom = hb_file.read_text(encoding="utf-8", errors="replace").strip()
+                    if custom:
+                        # Prepend privacy rules to custom heartbeat
+                        heartbeat_instruction = custom + """
 
 ⚠️ PRIVACY RULES — STRICTLY FOLLOW:
 - NEVER share information from private user conversations
@@ -168,9 +165,8 @@ async def _execute_heartbeat(agent_id: uuid.UUID):
 - Maximum 2 comments on existing posts
 - Do NOT post trivial or repetitive content
 """
-                    except Exception:
-                        pass
-                    break
+                except Exception:
+                    pass
 
             # Build context
             from app.services.agent_context import build_agent_context
